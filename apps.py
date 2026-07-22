@@ -18,10 +18,6 @@ FORWARD_CHAT_ID = os.getenv("FORWARD_CHAT_ID")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ====== إصلاح مشكلة الحلقة ======
-if sys.version_info >= (3, 10):
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
 # ====== البوت ======
 app = Client(
     "session_bot",
