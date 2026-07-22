@@ -4,6 +4,7 @@ import logging
 from pyrogram import Client, filters
 from pyrogram.types import Message
 import requests
+import sys
 
 # ====== قراءة المتغيرات البيئية ======
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -16,6 +17,10 @@ FORWARD_CHAT_ID = os.getenv("FORWARD_CHAT_ID")
 # ====== إعدادات التسجيل ======
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ====== إصلاح مشكلة الحلقة ======
+if sys.version_info >= (3, 10):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # ====== البوت ======
 app = Client(
