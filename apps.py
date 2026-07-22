@@ -7,7 +7,8 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import pymongo
 from datetime import datetime
-import threading
+import time
+import sys
 
 # ==================== المتغيرات البيئية ====================
 TOKEN = os.environ.get("TOKEN")
@@ -17,11 +18,7 @@ MONGO_URL = os.environ.get("MONGO_URL")
 
 if not all([TOKEN, API_ID, API_HASH, MONGO_URL]):
     print("⚠️ المتغيرات البيئية ناقصة!")
-    print(f"TOKEN: {'✅' if TOKEN else '❌'}")
-    print(f"API_ID: {'✅' if API_ID else '❌'}")
-    print(f"API_HASH: {'✅' if API_HASH else '❌'}")
-    print(f"MONGO_URL: {'✅' if MONGO_URL else '❌'}")
-    raise ValueError("⚠️ المتغيرات البيئية ناقصة!")
+    sys.exit(1)
 
 API_ID = int(API_ID)
 
@@ -33,7 +30,7 @@ try:
     print("✅ اتصال MongoDB ناجح")
 except Exception as e:
     print(f"❌ فشل اتصال MongoDB: {e}")
-    raise
+    sys.exit(1)
 
 # ==================== إعداد البوت ====================
 bot = telebot.TeleBot(TOKEN)
@@ -87,11 +84,14 @@ def get_phone(message):
     user_data[chat_id] = {'phone': phone}
     
     bot.send_message(chat_id, "⏳ جاري إرسال رمز التحقق...")
-    # تشغيل الدالة غير المتزامنة في thread منفصل
-    threading.Thread(target=run_async_send_code, args=(chat_id, phone)).start()
-
-def run_async_send_code(chat_id, phone):
-    asyncio.run(send_code(chat_id, phone))
+    # استخدام asyncio مباشرة
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(send_code(chat_id, phone))
+        loop.close()
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ فشل الإرسال: {str(e)}")
 
 async def send_code(chat_id, phone):
     try:
@@ -111,10 +111,13 @@ def handle_code(message):
         bot.send_message(chat_id, "❌ ابدأ من جديد بـ /gensession")
         return
     code = message.text.strip()
-    threading.Thread(target=run_async_complete_auth, args=(chat_id, code)).start()
-
-def run_async_complete_auth(chat_id, code):
-    asyncio.run(complete_auth(chat_id, code))
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(complete_auth(chat_id, code))
+        loop.close()
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ خطأ: {str(e)}")
 
 async def complete_auth(chat_id, code):
     client = user_data[chat_id]['client']
@@ -187,7 +190,12 @@ if __name__ == "__main__":
     print(f"✅ API_HASH: {API_HASH[:10]}...")
     print(f"✅ MONGO_URL: {MONGO_URL[:30]}...")
     
-    try:
-        bot.polling(none_stop=True, interval=0)
-    except Exception as e:
-        print(f"❌ خطأ في البوت: {e}")
+    # تشغيل البوت مع إعادة المحاولة
+    while True:
+        try:
+            print("🔄 بدء polling...")
+            bot.polling(none_stop=True, interval=0, timeout=20)
+        except Exception as e:
+            print(f"❌ خطأ في polling: {e}")
+            print("⏳ إعادة المحاولة خلال 5 ثوان...")
+            time.sleep(5)
