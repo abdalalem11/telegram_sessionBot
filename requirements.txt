@@ -1,4 +1,2 @@
 pyrogram==2.0.106
 requests==2.28.2
-pytgcalls==3.0.1
-aiohttp==3.8.4
